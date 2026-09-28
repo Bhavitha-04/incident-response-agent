@@ -1,0 +1,105 @@
+Incident Summary
+
+Service: checkout (HTTP API)
+Symptom: 500 Internal Server Errors, current error rate ~12%
+Timeline: First observed after a deployment completed at 06:31 UTC
+Question: “Should we roll back the deployment?”
+1. Root Cause (pre‑liminary)
+Based on the pattern of recent incidents (read‑replica detachment, BGP route‑policy errors, corrupted iptables after a K8s upgrade, etc.) the first‑order assumption that a code rollback will fix the problem is a known trap.
+
+Typical root‑cause candidates for a sudden 500 surge after a deployment are:
+
+Configuration change introduced in the deployment (environment variables, feature flags, connection‑string updates).
+Network/infra change that coincided with the deployment time (e.g., BGP policy, Transit‑Gateway saturation, DNS zone truncation).
+Database read‑replica re‑attachment failure – primary forced to serve all reads, leading to high latency and 500s from the app.
+Corrupted iptables / security‑group rules caused by a partial K8s upgrade – also manifests as intermittent 500s.
+Until we verify which of the above is true, rolling back the container image is unlikely to resolve the issue and may waste time or re‑introduce a broken state.
+
+2. Immediate Diagnostic Steps (do NOT rollback yet)
+| Step | Command / Action | Expected Output |
+
+|------|------------------|-----------------|
+
+| A. Verify pod health | kubectl -n <checkout‑ns> get pods -l app=checkout -o wide | Pods Ready = 1/1, no CrashLoopBackOff |
+
+| B. Check recent config diff | kubectl -n <checkout‑ns> rollout history deployment/checkout <br> kubectl -n <checkout‑ns> get deployment checkout -o yaml | grep -A5 env: | Look for new env vars or secret mounts |
+
+| C. Inspect app logs for stack traces | kubectl -n <checkout‑ns> logs -l app=checkout --tail=200 | grep -i "error" | Presence of DB timeout, connection refused, or DNS errors |
+
+| D. Correlate with DB read‑replica status | kubectl -n db get pods -l role=read-replica <br> kubectl exec <primary-pod> -- mysql -e "SHOW GLOBAL STATUS LIKE 'Threads_connected';" | Replicas detached → primary CPU > 90% |
+
+| E. Network metrics | In CloudWatch / Prometheus: <br> avg(rate(node_network_receive_bytes_total[1m])) for the VPC where checkout runs | Sudden drop in packets or increased retransmits |
+
+| F. BGP / TGW health | aws ec2 describe-transit-gateway-attachments --transit-gateway-id <tgw-id> | Look for “saturated” or “packet-drop” alerts around 06:30‑07:00 |
+
+| G. DNS zone health (if checkout resolves service names) | dig +short <db-hostname> from a checkout pod | NXDOMAIN or high latency indicates DNS issue |
+
+If any of the checks in D–G reveal an infrastructure problem, the fix will be on that layer, not a code rollback.
+
+3. Recommended Fix (based on likely root cause)
+#### Scenario A – Configuration error in deployment
+
+Patch the config without redeploying the image:
+BASH
+
+Copy
+kubectl -n <checkout‑ns> set env deployment/checkout DB_MAX_POOL=200 --record
+   kubectl -n <checkout‑ns> rollout pause deployment/checkout   # if you need to edit multiple envs
+   # apply corrected ConfigMap / Secret if that is the source
+   kubectl -n <checkout‑ns> apply -f corrected-config.yaml
+   kubectl -n <checkout‑ns> rollout resume deployment/checkout
+Verify error rate falls below 2% for 5‑minute windows.
+#### Scenario B – Read‑replica detach / primary saturation
+
+Re‑attach replicas manually (or trigger the automated re‑attach script):
+BASH
+
+Copy
+# Example for Vitess / MySQL
+   mysql -h primary-db -e "START SLAVE ALL;"   # or appropriate command for your platform
+Increase replica pool size if needed: adjust the service‑router or ProxySQL config to route reads to replicas.
+Monitor primary CPU; it should drop below 70%.
+#### Scenario C – BGP / Transit‑Gateway packet loss
+
+Rollback the recent BGP policy change (if any) or reorder terms correctly:
+BASH
+
+Copy
+# Example using AWS CLI
+   aws ec2 replace-transit-gateway-route-table-association \
+       --transit-gateway-route-table-id <rtb-id> \
+       --association-id <assoc-id> \
+       --replace-route-table-id <good-rtb-id>
+Verify TGW metrics return to baseline (<1% packet loss).
+#### Scenario D – Corrupted iptables after a partial K8s upgrade
+
+Force a node‑level iptables refresh (no pod restart required):
+BASH
+
+Copy
+for node in $(kubectl get nodes -o name); do
+       kubectl debug $node -it --image=busybox -- chroot /host iptables-restore < /etc/iptables/rules.v4
+   done
+Confirm connectivity from checkout pods to downstream services.
+Do NOT perform: rollback_deployment, restart_service, or scale_deployment as these are listed as trap actions for this class of incident.
+
+4. Severity Assessment
+| Metric | Value | Impact |
+
+|--------|-------|--------|
+
+| Error rate | 12% (500s) | Visible to customers, checkout failures |
+
+| SLA breach | Yes (target <1% error) | Revenue impact |
+
+| Service dependency | Front‑end & payments | Medium‑high |
+
+Assigned Severity: SEV‑2 (High) – Service is partially degraded with a measurable impact on revenue; requires remediation within the next 30 minutes, but the system is not completely unavailable.
+
+5. Next Steps Summary
+Run the diagnostic table (A‑G) immediately.
+Identify which scenario (A‑D) matches the observed data.
+Apply the corresponding fix without rolling back the container image.
+Continue to monitor the error rate; once it stays <2% for 10 minutes, declare the incident resolved.
+Post‑mortem: capture the exact change that triggered the failure (BGP policy, config diff, etc.) and add a guardrail (e.g., automated config validation) to prevent recurrence.
+Key Takeaway: This incident follows the same pattern as several past incidents where a deployment rollback was a trap and did not address the underlying infrastructure or configuration error. Focus on the root cause diagnostics first; only consider a code rollback if a direct code bug is confirmed.
