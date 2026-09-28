@@ -1,5 +1,6 @@
 import warnings
 warnings.filterwarnings("ignore", message="Unclosed")
+
 import os
 from hindsight_client import Hindsight
 from dotenv import load_dotenv
@@ -18,3 +19,6 @@ def store_incident(content: str):
 
 def recall_incidents(query: str):
     return client.recall(bank_id=BANK_ID, query=query)
+
+def reflect_on_incidents(query: str):
+    return client.reflect(bank_id=BANK_ID, query=query)
