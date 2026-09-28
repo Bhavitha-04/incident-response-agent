@@ -1,3 +1,6 @@
+import sys
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 from agent import analyze_incident
 from hindsight import client, BANK_ID
 import hindsight

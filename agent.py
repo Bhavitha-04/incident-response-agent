@@ -29,7 +29,17 @@ Identify:
 2. Exact fix (with commands if applicable)
 3. Severity
 
-If this matches a known pattern from past incidents, say so explicitly."""
+If this matches a known pattern from past incidents, say so explicitly.
+
+IMPORTANT FORMATTING RULES:
+- Use plain ASCII only. No Unicode symbols, arrows, emojis, or special characters.
+- Use regular hyphens (-) instead of en-dashes or em-dashes.
+- Use -> instead of the arrow character.
+- Use * or - for bullet points, not the bullet symbol.
+- Use [1], [2] instead of keycap emojis like 1.
+- Do not use checkmarks, crosses, warning signs, or any emoji.
+- Output should be readable in a plain terminal with no rendering issues.
+"""
 
     # Step 4: Call the LLM
     response = groq_client.chat.completions.create(
