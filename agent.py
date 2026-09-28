@@ -31,6 +31,18 @@ Identify:
 
 If this matches a known pattern from past incidents, say so explicitly.
 
+CRITICAL - TRAP ACTION AWARENESS:
+Past incidents may contain "trap actions" - fixes that seemed obvious but MADE THINGS WORSE.
+If the recalled memories mention trap actions, you MUST:
+- Explicitly warn against them: "DO NOT do X - this was a trap action in past incidents."
+- Explain what happened when that fix was attempted
+- Recommend the diagnostic steps or alternative fix instead
+
+For example, if past incidents show that "rollback_deployment" or "scale_deployment"
+made things worse during network-related outages, warn the user clearly:
+"DO NOT roll back the deployment. In past incidents (Slack, Cloudflare), rolling back
+during a network fault wasted time and did not resolve the outage."
+
 IMPORTANT FORMATTING RULES:
 - Use plain ASCII only. No Unicode symbols, arrows, emojis, or special characters.
 - Use regular hyphens (-) instead of en-dashes or em-dashes.
