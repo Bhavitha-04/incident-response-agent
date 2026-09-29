@@ -287,14 +287,15 @@
     }
   }
 
-  function saveHistoryItem(description, diagnosis, timestamp) {
+    function saveHistoryItem(description, diagnosis, timestamp, confidence) {
     try {
       const history = loadHistory();
       const newItem = {
         id: 'inc_' + Date.now(),
         description,
         diagnosis,
-        timestamp: timestamp || new Date().toISOString()
+        timestamp: timestamp || new Date().toISOString(),
+        confidence: confidence || 'Medium'
       };
 
       // Deduplicate identical descriptions and keep up to MAX_HISTORY items
@@ -345,7 +346,7 @@
     autoResizeTextarea();
     updateCharCounter();
 
-    displayDiagnosis(found.diagnosis, found.timestamp);
+        displayDiagnosis(found.diagnosis, found.timestamp, found.confidence);
     toggleHistoryMenu(false);
     hideError();
   }
@@ -455,11 +456,23 @@
     }
   }
 
-  function displayDiagnosis(diagnosisText, timestampIso) {
+    function displayDiagnosis(diagnosisText, timestampIso, confidence) {
     currentRawDiagnosis = diagnosisText;
 
     // Render markdown to HTML
     elements.diagnosisContent.innerHTML = renderMarkdown(diagnosisText);
+
+    // Handle confidence badge
+    const badge = document.getElementById('confidenceBadge');
+    if (badge) {
+      if (confidence) {
+        badge.textContent = confidence + ' Confidence';
+        badge.className = 'confidence-badge confidence-' + confidence.toLowerCase();
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+    }
 
     // Format timestamp
     const timeFormatted = formatTimestamp(timestampIso);
@@ -515,14 +528,14 @@
         throw new Error(`Incident analysis failed: ${errDetail}`);
       }
 
-      const data = await response.json();
+            const data = await response.json();
       if (!data || typeof data.diagnosis !== 'string') {
         throw new Error('Invalid response structure: expected JSON { "diagnosis": "..." } from /analyze');
       }
 
       const timestamp = new Date().toISOString();
-      displayDiagnosis(data.diagnosis, timestamp);
-      saveHistoryItem(description, data.diagnosis, timestamp);
+      displayDiagnosis(data.diagnosis, timestamp, data.confidence);
+            saveHistoryItem(description, data.diagnosis, timestamp, data.confidence);
       setConnectionStatus('connected', 'Connected');
     } catch (err) {
       console.error('Analysis error:', err);

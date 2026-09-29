@@ -1,17 +1,30 @@
 import os
+import re
 from groq import Groq
 from dotenv import load_dotenv
 from hindsight import recall_incidents, reflect_on_incidents, recall_with_scores
 
 load_dotenv()
+
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+
+def extract_confidence(text: str) -> str:
+    """Extract confidence level from the diagnosis text."""
+    match = re.search(r"[Cc]onfidence[:\s\-\*]+(\w+)", text)
+    if match:
+        level = match.group(1).lower()
+        if level in ["high", "medium", "low"]:
+            return level.capitalize()
+    return "Medium"
+
 
 def analyze_incident(incident_description: str):
     reflection = reflect_on_incidents(incident_description)
     scored_memories = recall_with_scores(incident_description)
 
-    # Build memory context with scores
     memory_context = f"HINDSIGHT REFLECTION:\n{reflection}\n\n"
+
     if scored_memories:
         memory_context += "RANKED MEMORIES (by relevance):\n"
         for item in scored_memories:
@@ -46,4 +59,11 @@ FORMATTING: Plain ASCII only. Use hyphens, ->, and [1], [2]. No emojis."""
         ],
         max_tokens=2000,
     )
-    return response.choices[0].message.content
+
+    diagnosis_text = response.choices[0].message.content
+    confidence = extract_confidence(diagnosis_text)
+
+    return {
+        "diagnosis": diagnosis_text,
+        "confidence": confidence,
+    }
