@@ -95,3 +95,22 @@ Same 10 incidents, same LLM, no memory. The baseline hallucinated:
 - [Hindsight GitHub repository](https://github.com/vectorize-io/hindsight)
 - [Hindsight documentation](https://hindsight.vectorize.io/)
 - [Agent memory explained](https://vectorize.io/what-is-agent-memory)
+
+## Team Content
+
+Content published by team members:
+## Team Content
+
+Content published by team members:
+
+| # | Member | Article | LinkedIn Post |
+|---|--------|---------|---------------|
+| 1 | Bhavitha | [How Hindsight Stopped My LLM From Fabricating kubectl Output](https://dev.to/bhavitha_3f5773ee89df1aec/how-hindsight-stopped-my-llm-from-fabricating-kubectl-output-5jp) | [LinkedIn](https://lnkd.in/p/d7D4ibAY) |
+| 2 | Saikeerthika | [What 104 Real Postmortems Taught My Agent](https://dev.to/kudikala_saikeerthika_672/what-104-real-postmortems-taught-my-agent-that-i-couldnt-have-written-myself-3n8j) | [LinkedIn](https://lnkd.in/p/drhVaH_u) |
+| 3 | Khethana | [What I Used Hindsight's reflect and recall For](https://dev.to/khethana_fd6ed47eb3fe846a/what-i-used-hindsights-reflect-and-recall-for-and-what-i-havent-proven-about-them-1gn4) | [LinkedIn](https://lnkd.in/p/dAhDSZzr) |
+| 4 | Shivaleela | [Five Steps Between an Incident Description and a "DO NOT"](https://dev.to/a_shivaleela_e7c88f17c3f0/five-steps-between-an-incident-description-and-a-do-not-3343) | [LinkedIn](https://lnkd.in/p/d_PAxqBV) |
+| 5 | Poojitha | [The Most Useful Thing My Incident Agent Says Is "Don't"](https://dev.to/poojitha_narkatpally_fe23/the-most-useful-thing-my-incident-agent-says-is-dont-ape) | [LinkedIn](https://www.linkedin.com/posts/poojitha-narkatpally-a87985345_aiagents-ai-hindsight-ugcPost-7510718169901297665-gPWX/) |
+| 6 | Sravya | [My First 10/10 Was a Lie: How I Tested an SRE Agent Properly](https://dev.to/sravya_marikokkula_dea1b7/my-first-1010-was-a-lie-how-i-tested-an-sre-agent-properly-466e) | [LinkedIn](https://lnkd.in/p/djkAtqyC) |
+
+All 6 team members have published an article and a LinkedIn post. Video: [YouTube](https://youtu.be/ocWeWGfW5ik?si=CmVo1Ls4lTQAjUls)
+[Reddit post](https://www.reddit.com/r/LLMDevs/comments/1wta6s8/my_llm_fabricated_kubectl_output_postmortem/)
