@@ -2,7 +2,7 @@ import os
 import re
 from groq import Groq
 from dotenv import load_dotenv
-from hindsight import recall_incidents, reflect_on_incidents, recall_with_scores
+from hindsight import reflect_on_incidents, recall_with_scores
 from signature import extract_signature
 
 load_dotenv()
@@ -17,13 +17,21 @@ def extract_confidence(text: str) -> str:
         level = match.group(1).lower()
         if level in ["high", "medium", "low"]:
             return level.capitalize()
-    return "Medium"
+    return "Unknown"
 
 
 def analyze_incident(incident_description: str):
     # Step 1: Extract structured signature to enrich the memory query
     sig = extract_signature(incident_description)
-    enriched_query = f"{incident_description} [service: {sig['service']}, type: {sig['error_type']}]"
+    if sig['service'] or sig['error_type']:
+        parts = []
+        if sig['service']:
+            parts.append(f"service: {sig['service']}")
+        if sig['error_type']:
+            parts.append(f"type: {sig['error_type']}")
+        enriched_query = f"{incident_description} [{', '.join(parts)}]"
+    else:
+        enriched_query = incident_description
 
     # Step 2: Reflect - Hindsight synthesizes a reasoned answer across memories
     reflection = reflect_on_incidents(enriched_query)

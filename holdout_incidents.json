@@ -1,0 +1,350 @@
+[
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "5983a82035274898b48f0d101307a09d",
+    "scenario_id": "104-slack_tgw_fd_exhaustion",
+    "reward": 0.2239,
+    "subscores": {
+      "root_cause_category": 0.15,
+      "evidence_keywords": 0.45454545454545453,
+      "ruled_out_red_herrings": 0.2,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 7,
+    "tools_used": [
+      "get_alerts",
+      "get_metrics",
+      "get_deployment_status",
+      "get_node_status",
+      "get_events",
+      "get_logs",
+      "query_traces"
+    ],
+    "n_agent_steps": 8,
+    "answer": "Perfect! I now have complete root cause analysis. The evidence is conclusive:\n\n## Summary of Findings\n\n**Timeline:**\n1. **06:52** \u2014 First-Monday traffic surge + cold cache hit triggers cross-VPC packet loss on Transit Gateway (11.8%, SLO 0.1%)\n2. **06:55** \u2014 Dashboarding pods fail readiness probes (can't reach DB across saturated TGW)\n3. **06:57** \u2014 HPA downscales (misinterprets low CPU caused by network blockage as idle)\n4. **06:58** \u2014 webapp error_rate fires (9.3%)\n5. **07:01-07:15** \u2014 HPA aggressively upscales +1,200 replicas to chase latency\n6. **07:03** \u2014 provision-service hits Linux FD limit + AWS quota during burst\n\n**Root Cause:**\nThe **Transit Gateway tgw-0a91f** is saturated by first-Monday traffic volume (~1.45M \u2192 2.95M pps), causing 11.8% cross-VPC packet loss. This is NOT a code regression\u2014it's a network fabric saturation event. The low CPU (28% vs baseline 55%) is because 96% of Apache worker threads are blocked on network I/O (TCP retransmits on the lossy TGW path). The autoscaler's CPU-based heuristic is useless in a network-blocked scenario and triggers a harmful upscale that exhausts provisioning quota.\n\n**Why recent deploys are a red herring:** The deployment (rev1/rev2) landed at 06:31 and 06:48; packet loss fired at 06:52. The deploys contain no networking changes and are unrelated.\n\n---\n\n**ROOT_CAUSE:** Transit Gateway tgw-0a91f is saturated by first-Monday cold-cache traffic surge (packets jumped from 1.45M to 2.95M pps), causing 11.8% cross-VPC packet loss to the metrics database. This blocks all webapp threads on network I/O (96% blocked), creating high latency (p99 4800ms) despite paradoxically low CPU (28%), which triggers a misguided HPA upscale that exhausts provisioning quota and breaks the dashboarding tier (victim of the same network path saturation).\n\n**ROOT_CAUSE_CATEGORY:** saturation\n\n**FIX:** Scale up the AWS Transit Gateway tgw-0a91f attachment bandwidth/capacity to absorb the 2.95M pps traffic surge (or throttle/cache webapp requests to reduce cross-VPC DB hits while the TGW scales). Then immediately scale down webapp replicas back to baseline (desired=40) to unwind the harmful +1,200 upscale and free provisioning quota. Do NOT rollback the morning deploys\u2014they are not the cause.",
+    "incident": "slack_tgw_fd_exhaustion",
+    "source": "real",
+    "true_category": "network_fault",
+    "source_company": "Slack",
+    "source_url": "https://slack.engineering/slacks-outage-on-january-4th-2021/",
+    "trap_actions": [
+      "scale_deployment: aggressively scale the web tier UP (+1,200 replicas) while the Transit Gateway is saturated \u2014 low CPU was blocked-on-network, not idle; this drove provision-service into the Linux open-file limit + AWS API quota and pinned the ASG at max, PROLONGING the outage",
+      "rollback_deployment: roll back the day-of webapp deploys (rev1/rev2) \u2014 the first instinct, but those changes are unrelated to networking and the rollback does nothing for the cross-VPC packet loss"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "041f8bbd0f8f4746bc6a413dc59df477",
+    "scenario_id": "113-cloudflare_1111_zonemd_stale_cache",
+    "reward": 0.3786,
+    "subscores": {
+      "root_cause_category": 0.15,
+      "evidence_keywords": 1.0,
+      "ruled_out_red_herrings": 0.1111111111111111,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 7,
+    "tools_used": [
+      "get_alerts",
+      "describe_pod",
+      "get_logs",
+      "get_deployment_status",
+      "get_events",
+      "get_metrics",
+      "query_traces"
+    ],
+    "n_agent_steps": 8,
+    "answer": "Perfect. I now have conclusive evidence of the true root cause.\n\n---\n\n## Analysis Summary\n\n**The Critical Chain:**\n1. **2023-09-21**: Root zone adds ZONEMD record (a new DNSSEC feature). Pods launch and preload root snapshot (serial 2023092101) successfully.\n2. **2023-09-22 onward**: Daily root-zone updates fail to parse (unknown RR type ZONEMD) in the `static_zone_preload` container. The parser silently retains the previous (stale) root snapshot instead of updating.\n3. **2023-10-04 07:00**: The preloaded root's DNSSEC signatures expire. Pods with 13-day uptime still hold this frozen 13-day-old snapshot in memory.\n4. **Result**: DNSSEC validation against the stale snapshot fails with SERVFAIL (signatures expired), even though the **upstream root zone is perfectly healthy** with valid current signatures.\n\n**Adversarial Evidence Ruled Out:**\n- \u2705 Upstream DNS/DNSSEC: Healthy (fresh pod fetches it successfully, live nameservers return valid RRSIG + ZONEMD)\n- \u2705 Bad deploy: No code change at onset; rollout 9 days prior; all replicas Ready\n- \u2705 Resource exhaustion: CPU 31%, memory 41% \u2014 nominal\n- \u2705 Pod restart: Long uptime is the *symptom* (old snapshot retained), not the cause\n\n**The Trap in the Alert Description:**\nThe alert blamed \"upstream IANA/root-server DNSSEC signing problem\" \u2014 plausible but **wrong**. The upstream root is fine. The failure is *entirely internal*: our `static_zone_preload` parser cannot handle ZONEMD records and froze the preload at the old root.\n\n---\n\n**ROOT_CAUSE:** The `static_zone-preload` container cannot parse ZONEMD records (unknown RR type 63) added to the root zone on 2023-09-21, so it silently froze the preloaded root snapshot at 13 days old. On 2023-10-04T07:00 UTC, that stale snapshot's DNSSEC signatures expired, causing validation failures (SERVFAIL) on all non-restarted pods. The upstream root zone is healthy; the failure is entirely local to the frozen in-memory cache.\n\n**ROOT_CAUSE_CATEGORY:** `bad_deploy`\n\n(The `static_zone_preload` component lacks support for ZONEMD \u2014 a protocol deficiency introduced in production.)\n\n**FIX:** `kubectl rollout restart deployment/{{VICTIM_WORKLOAD}} -n resolver-prod`\n\n(Restarting all replicas will force `static_zone_preload` to re-fetch the current root zone. Although the current image still cannot parse ZONEMD, it will fall back to live upstream root fetches, which are valid. This is a temporary bridge to restore service while a code fix is prepared.)",
+    "incident": "cloudflare_1111_zonemd_stale_cache",
+    "source": "real",
+    "true_category": "config_error",
+    "source_company": "Cloudflare",
+    "source_url": "https://blog.cloudflare.com/1-1-1-1-lookup-failures-on-october-4th-2023/",
+    "trap_actions": [
+      "Apply the rec_disable_static override-rule tag to disable static_zone per-request \u2014 DID NOT WORK: the tag is not carried on internally-forwarded cache-miss queries, so those queries keep validating against the stale static root and SERVFAILs persist; sampled-query 'recovery' was misleading",
+      "Escalate to / wait on the upstream root operator or DNSSEC signer to 're-sign the root' \u2014 wrong target: the live root is already validly signed (upstream_root_rrsig_valid=1), only the internal stale snapshot expired",
+      "renew_certificate / treat this as a TLS-or-key expiry to rotate \u2014 wrong: the expiry is the cached root zone's DNSSEC RRSIG on a frozen snapshot, fixed by dropping the stale snapshot, not by rotating any credential"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "b2187a20f01d45e6ab2cf1ae8c6a2b26",
+    "scenario_id": "101-circleci_kubeproxy_iptables",
+    "reward": 0.24,
+    "subscores": {
+      "root_cause_category": 0.0,
+      "evidence_keywords": 0.8,
+      "ruled_out_red_herrings": 0.0,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 4,
+    "tools_used": [
+      "get_alerts",
+      "get_node_status",
+      "get_events",
+      "get_deployment_status"
+    ],
+    "n_agent_steps": 5,
+    "answer": "---\n\n## Summary\n\n**ROOT_CAUSE:** During a rolling upgrade of kube-proxy to v1.27.2 on two nodes, the kubelet remained at v1.26.6, creating a version skew. kube-proxy v1.27.2 cannot parse iptables rules for v1.26.6, causing iptables-restore to fail with exit code 2. Service routing rules on those nodes are stale, so all ClusterIP traffic (including DNS) times out or is refused.\n\n**ROOT_CAUSE_CATEGORY:** bad_deploy\n\n**FIX:** Roll back kube-proxy to v1.26.6 on the two affected nodes (gke-ci-main-prod-np-a3f91c2d-9xkt and gke-ci-main-prod-np-a3f91c2d-2hrl) or complete the kubelet upgrade to v1.27.2 to match, then restart kube-proxy pods to allow iptables rules to resync.",
+    "incident": "circleci_kubeproxy_iptables",
+    "source": "real",
+    "true_category": "network_fault",
+    "source_company": "CircleCI",
+    "source_url": "https://discuss.circleci.com/t/incident-report-2023-03-14-delays-starting-jobs/47555",
+    "trap_actions": [
+      "restart_pod on CoreDNS \u2014 broke DNS fully (the postmortem's wrong move that WORSENED the outage)",
+      "restart_pod on node-local-dns-cache \u2014 broke DNS fully (the postmortem's wrong move that WORSENED the outage)",
+      "rollback_deployment / roll back the partial K8s upgrade \u2014 wrong-direction surface-level fix that looked like recovery but did not regenerate the corrupted iptables rulesets",
+      "restart_service on miscellaneous app services \u2014 ineffective, did not address kube-proxy",
+      "mitigate before preserving RabbitMQ logging \u2014 led to the follow-on RMQ corruption tail"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "18ba17510b0d4462bfba8243be37e0ca",
+    "scenario_id": "114-cloudflare_byzantine_switch",
+    "reward": 0.6,
+    "subscores": {
+      "root_cause_category": 1.0,
+      "evidence_keywords": 0.5,
+      "ruled_out_red_herrings": 0.0,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 7,
+    "tools_used": [
+      "get_alerts",
+      "get_node_status",
+      "get_deployment_status",
+      "get_metrics",
+      "get_events",
+      "describe_pod",
+      "get_logs"
+    ],
+    "n_agent_steps": 8,
+    "answer": "Perfect. I now have a complete picture. Let me analyze the evidence:\n\n---\n\n## Root Cause Analysis\n\n**Evidence Summary:**\n1. **Switch Partial Failure:** tor-switch-cp-rack3 management plane is DOWN (ICMP unreachable) but data plane is still forwarding ~184k fps \u2014 textbook partial failure.\n2. **Byzantine Asymmetric Partition:** \n   - Node A (cluster-db-0) cannot reach Node C (cluster-db-2)\n   - Node B (cluster-db-1) can reach both A and C\n   - Node C cannot reach Node A\n   - This creates asymmetric reachability: A\u2194B OK, B\u2194C OK, A\u2194C DOWN\n3. **Persistent Split Vote:** 9 failed election rounds because:\n   - A votes for itself (refuses to acknowledge C, which it cannot reach)\n   - B votes for C\n   - C sees only 2/3 votes and cannot confirm A's acknowledgment (A is unreachable)\n   - No node can form a quorum of 2/3 = **split vote persists indefinitely**\n4. **Cascading Impact:** Control-plane-api success rate dropped to 75% because write transactions cannot proceed without a DB leader.\n5. **Red Herrings Ruled Out:**\n   - API deployment is healthy (unchanged 8 days, all replicas Ready)\n   - No resource exhaustion (CPU 3.1 cores, memory 41%)\n   - All pods report Ready status; all nodes report Ready\n   - This is **not** a bad deploy, OOM, or resource issue \u2014 it's a **network fabric failure**\n\nThe root cause is the **partially-failed switch creating Byzantine asymmetric reachability**, which prevents the Raft consensus group from electing a leader because nodes cannot agree on which peers are alive.\n\n---\n\n## Remediation\n\nThe only way to break the Byzantine deadlock is to **force a clean partition** by isolating the unreachable node(s) or the problematic switch link. The standard remediation for a partially-failed switch is to **drain/cordon the affected node(s)** and force the cluster to establish a quorum among the remaining reachable nodes, then repair the switch or replace the failed hardware.\n\n**Immediate action:** Cordon the node behind the faulty switch (node B on rack3) to force a clean 2-node partition where A and C can establish quorum without B's ambiguous reachability.\n\n---\n\nROOT_CAUSE: A tor-switch-cp-rack3 is partially failed \u2014 its management plane is down but data plane still forwards, creating asymmetric peer reachability (A cannot reach C, but B reaches both). This causes a persistent Byzantine split vote in the Raft consensus group: each node has a different view of liveness, no node can form a quorum, and leader election stalls indefinitely.\n\nROOT_CAUSE_CATEGORY: network_fault\n\nFIX: kubectl cordon gke-rlvr-bench-cp-pool-bb33cc44-b7nm && kubectl drain gke-rlvr-bench-cp-pool-bb33cc44-b7nm --ignore-daemonsets --delete-emptydir-data (isolate the node on the faulty switch to force a clean 2-node partition, allowing cluster-db-0 and cluster-db-2 to establish quorum and elect a leader; then replace or repair tor-switch-cp-rack3)",
+    "incident": "cloudflare_byzantine_switch",
+    "source": "real",
+    "true_category": "network_fault",
+    "source_company": "Cloudflare",
+    "source_url": "https://blog.cloudflare.com/a-byzantine-failure-in-the-real-world/",
+    "trap_actions": [
+      "restart_service",
+      "restart_pod",
+      "failover_service",
+      "scale_deployment"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "ea20caee205c487d94f0e927ed6a1a46",
+    "scenario_id": "106-github_network_partition_orchestrator",
+    "reward": 0.6833,
+    "subscores": {
+      "root_cause_category": 1.0,
+      "evidence_keywords": 0.7777777777777778,
+      "ruled_out_red_herrings": 0.0,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 5,
+    "tools_used": [
+      "describe_pod",
+      "get_events",
+      "get_logs",
+      "get_metrics",
+      "get_node_status"
+    ],
+    "n_agent_steps": 6,
+    "answer": "Perfect. I have enough evidence to diagnose the root cause. Let me analyze what happened:\n\n**Timeline & Causal Chain:**\n1. **22:51:17** \u2013 East-West optical link flapped for 43s during planned equipment maintenance (NetworkUnavailable=True on East node)\n2. **22:51:17\u201322:52:00** \u2013 East orchestrator lost Raft heartbeat to West peers; Raft election timer triggered\n3. **22:52:00** \u2013 East orchestrator leader deselected itself per Raft consensus rules (minority partition rule)\n4. **22:52:01** \u2013 West orchestrator nodes (which retained connectivity) reformed quorum WITHOUT East voting member\n5. **22:52:03** \u2013 West-elected orchestrator promoted mysql-primary-west-0 to writable primary and demoted East to read_only=ON\n6. **22:52:46** \u2013 East-West link restored; East rejoined as a *follower*, not a voting member\n7. **~40 minutes** \u2013 West primary accumulated writes that never replicated to East (replication lag = 2410s)\n8. **22:53:10+** \u2013 GTID sets diverged (split-brain): East and West each have transactions absent from the other\n\n**Key Insight:** The root cause is **Orchestrator's Raft quorum reformation logic during the transient partition**. When the East link went down, the orchestrator in the East minority partition correctly deselected itself. However, the West quorum reformed and elected a new leader WITHOUT readmitting East as a voting member after the link healed. This caused the topology manager to promote West as the authoritative primary while East was still holding unwritten transactions\u2014creating a split-brain scenario.\n\n**Why the East MySQL primary shows read_only=ON:** This is the *symptom*, not the cause. Orchestrator set it read-only to prevent dual-write conflicts after promoting West.\n\n**Remediation:** This is a split-brain data consistency incident that requires careful manual intervention. The safest immediate action is to:\n1. Restore East orchestrator as a voting member in the Raft quorum\n2. Rebuild East from West (or perform a controlled merge using GTID replication)\n3. Revert to single-writable-primary topology with proper quorum safety\n\nHowever, the *immediate* fix to stop the alert is to **restore the East orchestrator node to the Raft voting set**, which will then automatically resync the topology and coordinate a safe path forward.\n\n---\n\n**ROOT_CAUSE:** During a 43-second East-West network partition caused by optical equipment maintenance, the orchestrator Raft cluster reformed without East as a voting member. When the link healed, East was readmitted as a follower-only, allowing West to be promoted as the authoritative primary. This created a split-brain where East and West accumulated divergent write sets (2410 seconds of unreplicated lag), with orchestrator demoting the East MySQL primary to read_only=ON to prevent data corruption from dual-writes.\n\n**ROOT_CAUSE_CATEGORY:** network_fault\n\n**FIX:** `kubectl patch statefulset orchestrator -n data-east -p '{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"force-raft-rejoin\":\"true\"}}}}}' && kubectl rollout restart statefulset/orchestrator -n data-east` to force East orchestrator node back into the Raft voting set, which will allow orchestrator to detect the divergence and coordinate a split-brain recovery.",
+    "incident": "github_network_partition_orchestrator",
+    "source": "real",
+    "true_category": "network_fault",
+    "source_company": "GitHub",
+    "source_url": "https://github.blog/news-insights/company-news/oct21-post-incident-analysis/",
+    "trap_actions": [
+      "failover_service",
+      "rollback_deployment",
+      "scale_deployment"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "39bb50dd19884e1fb73f24b9c9381b0f",
+    "scenario_id": "112-github_cache_ttl_read_explosion",
+    "reward": 0.7321,
+    "subscores": {
+      "root_cause_category": 1.0,
+      "evidence_keywords": 0.8571428571428571,
+      "ruled_out_red_herrings": 0.25,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 7,
+    "tools_used": [
+      "get_metrics",
+      "get_deployment_status",
+      "get_logs",
+      "get_events",
+      "query_traces",
+      "get_alerts",
+      "get_node_status"
+    ],
+    "n_agent_steps": 8,
+    "answer": "That's fine\u2014we have enough evidence. Let me finalize my analysis:\n\n## Summary of Evidence\n\n**The Causal Chain (confirmed across all signals):**\n\n1. **Root Cause**: On 2026-02-09 at ~14:05Z, the settings-cache TTL was reduced from 12h \u2192 2h as part of a model rollout. This TTL reduction unmasked a pre-existing **10x read regression in two client apps** (mobile-app v8.2 and web-prefs-service v3.7) shipped ~3 weeks ago.\n\n2. **Amplification Mechanism**: \n   - As the 2h TTL entries began expiring at peak Monday traffic (~16:08Z), the two buggy clients triggered reads from user-settings-db at 10.2x their baseline rate.\n   - Each cache miss enqueued an **asynchronous cache rewrite** into the shared background-work-coordinator queue.\n   - This flooded the coordinator with 8400 async rewrites/s (vs. baseline 350/s), saturating its CPU to 97% and its queue depth to 22x.\n\n3. **The Visible Victim**: Git-HTTPS-proxy depends on the background-work-coordinator for its own work. With the coordinator fully occupied by cache rewrites, git-https-proxy could not acquire upstream connections, exhausting its 4096-connection pool, causing 503s and PR pushes not appearing.\n\n**Why this is NOT a Git-proxy or coordinator problem:**\n- Git-proxy deployment is unchanged for 23d (rev 31, image 2.41.0)\n- The proxy itself has 0 restarts, 0 OOM events\n- The logs show the proxy correctly identifying the coordinator as the bottleneck\n- Fixing this by rolling back the proxy would do nothing\n\n**The Correct Fix (per logs/events):**\n- Disabling async cache rewrites was the interim fix, which worked (coordinator queue drained by 17:39Z).\n- However, a second incident at 18:53Z shows sync writes from a different cache source created the same exhaustion.\n- **The root issue is the 10x read regression in the two buggy clients, now unmasked by the TTL change.**\n\n**The Single Remediation Action**: Revert the settings-cache TTL from 2h back to 12h to re-mask the client read regression until the two buggy client apps (mobile-app v8.2 and web-prefs-service v3.7) can be patched. This stops the TTL expiries that trigger the async rewrite flood.\n\n---\n\n**ROOT_CAUSE:** Two client apps (mobile-app v8.2 and web-prefs-service v3.7) released 3 weeks ago carry a 10x read regression in user-settings reads. On 2026-02-09 14:05Z, the settings-cache TTL was reduced from 12h to 2h, unmasking this regression. When 2h entries expired at peak Monday traffic (~16:08Z), the reads flooded the background-work-coordinator with 8400+ asynchronous cache rewrites/s, saturating it (CPU 97%, queue 22x) and preventing it from processing git-https-proxy work, exhausting the proxy's 4096-connection pool.\n\n**ROOT_CAUSE_CATEGORY:** saturation\n\n**FIX:** Revert the settings-cache TTL from 2h back to 12h in the settings-cache-config ConfigMap (original_ttl_seconds=43200) and restart the git-https-proxy deployment to clear exhausted connections; this re-masks the client read regression until mobile-app v8.2 and web-prefs-service v3.7 are patched.",
+    "incident": "github_cache_ttl_read_explosion",
+    "source": "real",
+    "true_category": "saturation",
+    "source_company": "GitHub",
+    "source_url": "https://github.blog/news-insights/company-news/github-availability-report-february-2026/",
+    "trap_actions": [
+      "Just revert the cache refresh TTL 2h -> 12h and declare it resolved \u2014 this is only HALF the story: it re-hides the symptom but leaves the latent 10x client read regression in place, so the cascade re-arms at the next peak (the documented half-fix that does not address the client read traffic)",
+      "Roll back / restart the git-https-proxy as the fix \u2014 the proxy is a downstream victim (revision 31 unchanged 23d, 0 restarts, image stable); rolling it back addresses nothing and restarts alone do not stop the upstream coordinator flood",
+      "Add user-settings-db capacity / scale the DB to fix 'saturation' \u2014 the read explosion is the latent client regression amplified by cache misses, not organic traffic, so more DB capacity does not stop the read amplification or the coordinator flood"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "1923271c194f47e3813eef6faff7f6ee",
+    "scenario_id": "107-github_mlag_stonith_splitbrain",
+    "reward": 0.6955,
+    "subscores": {
+      "root_cause_category": 1.0,
+      "evidence_keywords": 0.8181818181818182,
+      "ruled_out_red_herrings": 0.0,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 7,
+    "tools_used": [
+      "get_alerts",
+      "get_node_status",
+      "get_deployment_status",
+      "describe_pod",
+      "get_events",
+      "get_logs",
+      "get_metrics"
+    ],
+    "n_agent_steps": 8,
+    "answer": "## Root Cause Analysis Complete\n\nI have identified the exact failure chain:\n\n**Timeline:**\n1. **20:15:00** \u2014 Aggregation switch agent on agg-switch-a terminated for maintenance state dump; links stayed UP.\n2. **20:15:05** \u2014 agg-switch-b lost heartbeat to peer (agent down) but detected peer links were still UP, triggering DISRUPTIVE (not gentle) MLAG failover.\n3. **20:15:06\u201320:16:36** \u2014 Spanning-tree reconvergence blocked ALL inter-rack L2 traffic for ~90 seconds.\n4. **20:16:40** \u2014 Pacemaker heartbeat between fileserver pairs timed out (heartbeat runs on the same production fabric now blacked out), each pair declared the other dead.\n5. **20:16:43** \u2014 When network recovered, **both members of each pair simultaneously believed they were active** and issued mutual STONITH fencing \u2192 **both shut down**.\n6. **Result** \u2014 All 4 DRBD resources now have NO Primary; automatic recovery is unsafe (booting the stale node first risks data overwrite).\n\n**The Architectural Fault:** Pacemaker cluster heartbeat shares the same production L2 fabric as data traffic, with no separate OOB (out-of-band) heartbeat. The 90s L2 blackout exceeded the Pacemaker dead-timer.\n\n**The Trigger:** Terminating the MLAG agent while keeping peer links UP caused an unplanned disruptive failover + spanning-tree churn, not the switch upgrade itself.\n\n---\n\n**ROOT_CAUSE:** Pacemaker cluster heartbeat (running on production L2 fabric) timed out during a 90-second inter-rack spanning-tree reconvergence triggered by MLAG disruptive failover; when the network recovered, both members of each pair issued simultaneous mutual STONITH fences, stopping all 4 fileservers and leaving all DRBD resources with no Primary.\n\n**ROOT_CAUSE_CATEGORY:** network_fault\n\n**FIX:** Boot fileserver-pair1-a-0 (the last confirmed Primary per DRBD generation logs in the startup message) and allow it to become Primary; once healthy, boot the passive peers in order (pair1-b-0, pair2-a-0, pair2-b-0) to allow DRBD re-sync and restore the active pair count to 4.",
+    "incident": "github_mlag_stonith_splitbrain",
+    "source": "real",
+    "true_category": "network_fault",
+    "source_company": "GitHub",
+    "source_url": "https://github.blog/news-insights/downtime-last-saturday/",
+    "trap_actions": [
+      "restart_pod",
+      "restart_service",
+      "drain_node"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "3e56c22b0ed541599067085f42616c9b",
+    "scenario_id": "105-slack_consul_cache_db_metastable",
+    "reward": 0.6651,
+    "subscores": {
+      "root_cause_category": 1.0,
+      "evidence_keywords": 0.6428571428571429,
+      "ruled_out_red_herrings": 0.2222222222222222,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 6,
+    "tools_used": [
+      "get_alerts",
+      "get_metrics",
+      "get_events",
+      "get_deployment_status",
+      "query_traces",
+      "get_node_status"
+    ],
+    "n_agent_steps": 7,
+    "answer": "---\n\n## INVESTIGATION SUMMARY\n\nThe alert fired because the **memcached-gdm ring experienced cold-start** due to Consul-agent PBR upgrades triggering mcrib spare promotions and cache flushes. This collapsed the hit ratio from 0.992 \u2192 0.55, which caused:\n\n- **Cache misses** on GDM channel lookups (which list all channels a user is in)\n- **Cascading scatter queries** across all 64 shards of the channels keyspace (one miss \u2192 64 DB queries)\n- **Read QPS amplification** 6.1x baseline (driven by cache misses, not organic traffic: client request rate only 1.15x)\n- **Query timeouts** (p99 9.8s vs SLO 0.2s) because scatter queries fan out and serialize shard responses\n- **Metastable failure**: timeouts prevent cache refill, keeping the system in the failure mode\n\nThe root cause is **memcached ring churn during consul-agent restart**, not a database issue, code change, or organic traffic surge.\n\n**THE FIX:** Stop the Consul-agent PBR upgrade immediately (kill the rollout) to halt further ring deregistrations, allowing the memcached ring to stabilize and hit ratio to recover. Once mcrib stops promoting spares and flushing nodes, the cache will naturally refill from the scatter query backlog and pressure will drop.\n\n---\n\n**ROOT_CAUSE:** Consul-agent rolling restart triggered memcached-gdm ring deregistration, causing mcrib to promote spares and flush 45% of cached GDM entries. A single missing GDM entry cascades into a 64-shard scatter query, amplifying read load 6.1x baseline and causing query timeouts that prevent cache refill\u2014a metastable cold-cache failure.\n\n**ROOT_CAUSE_CATEGORY:** dependency_failure\n\n**FIX:** `kubectl rollout pause daemonset/consul-agent -n datastores` to halt the percentage-based restart upgrade, allowing the memcached-gdm ring to stabilize and naturally refill from the timeout backlog.",
+    "incident": "slack_consul_cache_db_metastable",
+    "source": "real",
+    "true_category": "dependency_failure",
+    "source_company": "Slack",
+    "source_url": "https://slack.engineering/slacks-incident-on-2-22-22/",
+    "trap_actions": [
+      "Raise / lift the client_boot throttle too aggressively (35%->90%) to recover faster \u2014 surged DB read QPS 6.1x->9.4x beyond sustainable and had to be reduced again (the documented worsening)",
+      "Restart the memcached cache nodes \u2014 adds more cache-ring churn, the exact mechanism that cooled the ring",
+      "Roll back unrelated / day-of application code \u2014 no relevant change exists (channels keyspace revision 7 is 19d old); wastes time on a red herring",
+      "Add Vitess capacity / shards to fix DB 'saturation' \u2014 read load is superlinear in the cache miss rate, not user traffic, so this does not address the cold cache ring"
+    ],
+    "difficulty": 5
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "893c9c1716c842c28cd389f1c33692af",
+    "scenario_id": "115-circleci_waf_manual_edit",
+    "reward": 0.6955,
+    "subscores": {
+      "root_cause_category": 1.0,
+      "evidence_keywords": 0.8181818181818182,
+      "ruled_out_red_herrings": 0.0,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 6,
+    "tools_used": [
+      "get_deployment_status",
+      "get_node_status",
+      "get_alerts",
+      "get_events",
+      "get_metrics",
+      "get_logs"
+    ],
+    "n_agent_steps": 7,
+    "answer": "Perfect. The evidence is airtight. Here's my diagnosis:\n\n---\n\n**ROOT_CAUSE:** An out-of-band WAF rule (`sec-monitor-block-rule`) was manually added to the live CloudFront WAF web-ACL at 00:16Z by the `security-monitoring-operator` IAM role, without going through the Terraform IaC pipeline. This rule returns 403 Forbidden to legitimate traffic (browsers, API calls, GitHub webhooks) before requests reach the origin, causing CORS preflight failures and request blocking.\n\n**ROOT_CAUSE_CATEGORY:** `config_error`\n\n**FIX:** Remove the out-of-band WAF rule `sec-monitor-block-rule` from the live CloudFront web-ACL for edge-waf-circleci, and audit the `security-monitoring-operator` IAM role permissions to prevent future out-of-band mutations.",
+    "incident": "circleci_waf_manual_edit",
+    "source": "real",
+    "true_category": "config_error",
+    "source_company": "CircleCI",
+    "source_url": "https://discuss.circleci.com/t/post-incident-report-april-4-2025-circleci-ui-loading-build-triggering-issues/53208",
+    "trap_actions": [
+      "Anchor on the just-resolved prior 'delays in starting workflows' incident and treat these CORS/connectivity errors as its aftereffects (re-open it) \u2014 the documented bias that wasted investigation time",
+      "Trust the IaC/Terraform state and git history and conclude 'the WAF cannot be the cause because no Terraform change exists' \u2014 fails to verify the LIVE cloud/edge state where the out-of-band rule actually is",
+      "rollback_deployment of circleci-frontend or api-gateway chasing a non-existent recent-deploy regression \u2014 ineffective, no app change occurred",
+      "'Fix CORS' / restart_service on the api-gateway to address CORS errors \u2014 wrong layer; origin CORS headers are already correct and the 403 is injected at the edge"
+    ],
+    "difficulty": 4
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "trace_id": "15b8c6c7f4d8449e9dffa55aa63f9389",
+    "scenario_id": "115-circleci_waf_manual_edit",
+    "reward": 0.7055,
+    "subscores": {
+      "root_cause_category": 1.0,
+      "evidence_keywords": 0.8181818181818182,
+      "ruled_out_red_herrings": 0.1,
+      "remediation_tool": 0.0
+    },
+    "n_tool_calls": 7,
+    "tools_used": [
+      "get_alerts",
+      "get_deployment_status",
+      "get_node_status",
+      "get_events",
+      "get_metrics",
+      "get_logs",
+      "query_traces"
+    ],
+    "n_agent_steps": 8,
+    "answer": "---\n\n## ROOT CAUSE ANALYSIS\n\nThe evidence is conclusive and multi-layered:\n\n**The Smoking Gun:**\n- The `EdgeWAFConfigDrift` alert shows a WAF rule named `sec-monitor-block-rule` (priority=3, action=BLOCK) exists in the LIVE CloudFront WAF web-ACL but is **absent from the Terraform desired state**.\n- Kubernetes events + logs confirm this rule was applied **out-of-band at 2026-06-20T00:16:11Z by the IAM role `security-monitoring-operator`** \u2014 no Terraform apply, no PR, pure console/API mutation.\n- The rule blocks 864 requests/sec across api.circleci.com and circleci.com (confirmed by metrics).\n\n**Why This Causes the Observed Symptoms:**\n1. **CORS errors + UI not loading**: Browser OPTIONS preflight requests to api.circleci.com hit the edge WAF rule \u2192 403 returned *before reaching the origin* \u2192 no CORS headers in response \u2192 browser CORS policy violation.\n2. **GitHub webhook failures**: Inbound webhook POSTs to api.circleci.com are 403'd at the edge (dropped from ~310/min to ~4/min) \u2192 workflows never triggered.\n3. **The Adversarial Red Herrings**: \n   - circleci-frontend and api-gateway deployments are completely healthy (4/4 and 6/6 replicas, unchanged for 3 days).\n   - Origin CORS headers are correct (100% compliance); only the edge blocks requests before the origin can respond.\n   - Direct in-cluster probes to api-gateway return 204 + correct ACAO headers, confirming the app has no CORS bug.\n   - Backend services return 0% 5xx errors; no origin health issue.\n\n---\n\n**ROOT_CAUSE:** An out-of-band WAF rule (`sec-monitor-block-rule`) was manually added to the CloudFront edge WAF by the `security-monitoring-operator` IAM role, circumventing the Terraform IaC pipeline. This rule broadly blocks legitimate traffic (UI loads, API calls, GitHub webhooks) intended to api.circleci.com and circleci.com, returning 403 Forbidden before requests reach the origin, causing browser CORS preflight failures and webhook drops.\n\n**ROOT_CAUSE_CATEGORY:** config_error\n\n**FIX:** Delete the out-of-band WAF rule `sec-monitor-block-rule` from the CloudFront web-ACL `edge-waf-circleci` via AWS Console (or CLI: `aws wafv2 update-web-acl --name edge-waf-circleci --scope=CLOUDFRONT --region us-east-1 ...`) to restore the Terraform-managed desired state, then audit and revoke the `security-monitoring-operator` IAM role's `wafv2:*` permissions to prevent future out-of-band mutations.",
+    "incident": "circleci_waf_manual_edit",
+    "source": "real",
+    "true_category": "config_error",
+    "source_company": "CircleCI",
+    "source_url": "https://discuss.circleci.com/t/post-incident-report-april-4-2025-circleci-ui-loading-build-triggering-issues/53208",
+    "trap_actions": [
+      "Anchor on the just-resolved prior 'delays in starting workflows' incident and treat these CORS/connectivity errors as its aftereffects (re-open it) \u2014 the documented bias that wasted investigation time",
+      "Trust the IaC/Terraform state and git history and conclude 'the WAF cannot be the cause because no Terraform change exists' \u2014 fails to verify the LIVE cloud/edge state where the out-of-band rule actually is",
+      "rollback_deployment of circleci-frontend or api-gateway chasing a non-existent recent-deploy regression \u2014 ineffective, no app change occurred",
+      "'Fix CORS' / restart_service on the api-gateway to address CORS errors \u2014 wrong layer; origin CORS headers are already correct and the 403 is injected at the edge"
+    ],
+    "difficulty": 4
+  }
+]
