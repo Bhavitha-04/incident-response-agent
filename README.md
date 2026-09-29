@@ -4,7 +4,7 @@ An AI agent that learns from real production outages using Hindsight memory.
 
 ## What It Does
 
-- Recalls past incidents from 114 real postmortems (Slack, Cloudflare, GitHub, AWS, Datadog, CircleCI)
+- Recalls past incidents from 104 real postmortems (Slack, Cloudflare, GitHub, AWS, Datadog, CircleCI, LaunchDarkly)
 - Warns against "trap actions" that made past outages worse
 - Gives specific fixes based on what worked before
 - Uses Hindsight's full memory API (`retain`, `recall`, `reflect`)
@@ -19,7 +19,7 @@ v
 Agent (Groq LLM + Hindsight memory)
 |
 v
-Hindsight Cloud (1,000+ facts, 180 observations, 5,000+ links)
+Hindsight Cloud (759 world facts, 182 observations, 7,135 links)
 
 ## Stack
 
@@ -29,7 +29,7 @@ Hindsight Cloud (1,000+ facts, 180 observations, 5,000+ links)
 | LLM | Groq (openai/gpt-oss-120b) |
 | Backend | FastAPI |
 | Frontend | Vanilla HTML/CSS/JS |
-| Dataset | OpenSRE (114 real incidents) |
+| Dataset | OpenSRE (104 seeded, 10 held out) |
 
 ## Run Locally
 
@@ -51,27 +51,44 @@ It cites real incidents (Slack TGW saturation, GitHub failover rollback) as evid
 
 ## Evaluation
 
-Tested on 10 incidents with known root causes and trap actions from the OpenSRE dataset.
+### Hold-Out Test
 
-| # | Incident | Root Cause | Trap Warning | Real Incident Cited |
-|---|----------|-----------|--------------|---------------------|
-| 1 | Redis latency spike | Yes | Yes | 2026-09-27 |
-| 2 | Checkout 500 after deploy | Yes | Yes | 2026-09-28 (systemd) |
-| 3 | Redis cluster latency | Yes | Yes | payments-api, auth-service |
-| 4 | BGP route reorder | Yes | Yes | Cloudflare 2022-06-21 |
-| 5 | DNS zone corruption | Yes | Yes | 2026-09-28 |
-| 6 | K8s CrashLoopBackOff | Yes | Yes | version-skew incidents |
-| 7 | DB connection pool | Yes | Yes | auth-service 503 |
-| 8 | systemd CNI flush | Yes | Yes | 2023-03-08 |
-| 9 | HPA mis-scale | Yes | Yes | Slack 2021-01-04 |
-| 10 | WAF manual edit | Yes | Yes | 2025-04-04 |
+We withheld 10 incidents from the memory bank entirely. The agent had never seen them.
 
-**Score: 10/10 root causes correct, 10/10 trap warnings, 10/10 real incident citations.**
+| # | Incident | True Category | Memory Diagnosis | Correct? |
+|---|----------|---------------|------------------|----------|
+| 1 | slack_tgw_fd_exhaustion | network_fault | TGW saturation (11.8% packet loss) | Yes |
+| 2 | cloudflare_1111_zonemd_stale_cache | config_error | Parser defect, RR type 63 ZONEMD | Yes |
+| 3 | circleci_kubeproxy_iptables | network_fault | kube-proxy/kubelet version skew | Yes |
+| 4 | cloudflare_byzantine_switch | network_fault | ToR switch partial failure | Yes |
+| 5 | github_network_partition_orchestrator | network_fault | Optical uplink flap, Raft split-brain | Yes |
+| 6 | github_cache_ttl_read_explosion | saturation | TTL reduction + client-read regression | Yes |
+| 7 | github_mlag_stonith_splitbrain | network_fault | MLAG failover, STP reconvergence | Yes |
+| 8 | slack_consul_cache_db_metastable | dependency_failure | Consul PBR restart, cache-ring churn | Yes |
+| 9 | circleci_waf_manual_edit | config_error | IAM out-of-band WAF edit | Yes |
+| 10 | circleci_waf_manual_edit | config_error | (Groq rate limit hit) | N/A |
+
+**Score: 9/10 root causes correct on held-out incidents.**
+
+### Baseline Comparison
+
+Same 10 incidents, same LLM, no memory. The baseline hallucinated:
+- Connection leaks that didn't exist (Test 1)
+- TTL configuration errors (Test 2)
+- Firewall ACL changes (Test 5)
+
+**The memory version cited real incident patterns; the baseline invented causes.**
+
+### Limitations
+
+- Small sample (n=10)
+- Groq free-tier rate limit affected test 10
+- Trap-action warnings measured qualitatively, not with a rubric
 
 ## Data Sources
 
-- 5 synthetic seed incidents (for controlled demo)
-- 114 real incidents from [OpenSRE](https://huggingface.co/datasets/quantranger/opensre-incident-trajectories)
+- 104 real incidents from [OpenSRE](https://huggingface.co/datasets/quantranger/opensre-incident-trajectories)
+- 10 incidents held out for evaluation
 
 ## Links
 
